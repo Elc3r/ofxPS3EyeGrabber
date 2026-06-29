@@ -154,11 +154,6 @@ public:
     void setFlip(bool horizontal = false, bool vertical = false) {
         flip_h = horizontal;
         flip_v = vertical;
-        uint8_t val = sccb_reg_read(0x0c);
-        val &= ~0xc0;
-        if (!horizontal) val |= 0x40;
-        if (!vertical) val |= 0x80;
-        sccb_reg_write(0x0c, val);
     }
     
     bool getTestPattern() const { return testPattern; }

@@ -711,6 +711,10 @@ void ofxPS3EyeGrabber::_threadedFunction()
     
     while (_isThreadRunning)
     {
+        uint8_t brightness = _cam->getBrightness(); // thread safe?
+        uint8_t contrast = _cam->getContrast(); // thread safe?
+        uint8_t sharpness = _cam->getSharpness(); // thread safe?
+        bool hFlip = _cam->getFlipH(); // thread safe?
         bool vFlip = _cam->getFlipV(); // thread safe?
         if (!_cam->getFrame(pixels.getData())) // thread safe?
             break;
@@ -722,7 +726,7 @@ void ofxPS3EyeGrabber::_threadedFunction()
         frame.timestamp = nowMillis;
         
         if (transferPixelFormat != OF_PIXELS_NATIVE)
-            frame.pixels = bayerConverter(pixels, pixelFormat, vFlip, demosaicType);
+            frame.pixels = bayerConverter(pixels, pixelFormat, brightness, contrast, sharpness, hFlip, vFlip, demosaicType);
         else
             frame.pixels = pixels;
 
@@ -768,17 +772,28 @@ ofPixelFormat ofxPS3EyeGrabber::_transferPixelFormat() const
 
 ofPixels ofxPS3EyeGrabber::bayerConverter(ofPixels& bayerPixels,
                                           ofPixelFormat targetFormat,
+                                          uint8_t brightness,
+                                          uint8_t contrast,
+                                          uint8_t sharpness,
+                                          bool hFlip,
                                           bool vFlip,
                                           DemosaicType _demosaicType)
 {
     if (targetFormat == OF_PIXELS_NATIVE)
-        return bayerPixels;
+    {
+        ofPixels pixels = bayerPixels;
+        if (hFlip || vFlip)
+        {
+            pixels.mirror(vFlip, hFlip);
+        }
+        return pixels;
+    }
 
     int code = 0;
 
     if (targetFormat == OF_PIXELS_GRAY)
     {
-        code = vFlip ? cv::COLOR_BayerRG2GRAY : cv::COLOR_BayerGB2GRAY;
+        code = cv::COLOR_BayerGB2GRAY;
     }
     else
     {
@@ -793,18 +808,18 @@ ofPixels ofxPS3EyeGrabber::bayerConverter(ofPixels& bayerPixels,
             case DemosaicType::DEMOSAIC_BILINEAR:
             {
                 if (targetFormat == OF_PIXELS_RGB)
-                    code = vFlip ? cv::COLOR_BayerRG2RGB : cv::COLOR_BayerGB2RGB;
+                    code = cv::COLOR_BayerGB2RGB;
                 else if (targetFormat == OF_PIXELS_BGR)
-                    code = vFlip ? cv::COLOR_BayerRG2BGR : cv::COLOR_BayerGB2BGR;
+                    code = cv::COLOR_BayerGB2BGR;
                 else ofLogError("ofxPS3EyeGrabber::bayerConverter") << "Unknown pixel type.";
                 break;
             }
             case DemosaicType::DEMOSAIC_VNG:
             {
                 if (targetFormat == OF_PIXELS_RGB)
-                    code = vFlip ? cv::COLOR_BayerRG2RGB_VNG : cv::COLOR_BayerGB2RGB_VNG;
+                    code = cv::COLOR_BayerGB2RGB_VNG;
                 else if (targetFormat == OF_PIXELS_BGR)
-                    code = vFlip ? cv::COLOR_BayerRG2BGR_VNG: cv::COLOR_BayerGB2BGR_VNG;
+                    code = cv::COLOR_BayerGB2BGR_VNG;
                 else ofLogError("ofxPS3EyeGrabber::update") << "Unknown pixel type.";
                 break;
             }
@@ -814,17 +829,38 @@ ofPixels ofxPS3EyeGrabber::bayerConverter(ofPixels& bayerPixels,
     ofPixels pixels;
     pixels.allocate(bayerPixels.getWidth(), bayerPixels.getHeight(), targetFormat);
     
-    cvtColor(cv::Mat(static_cast<int>(bayerPixels.getHeight()),
-                     static_cast<int>(bayerPixels.getWidth()),
-                     static_cast<int>(CV_MAKETYPE(CV_8U, bayerPixels.getNumChannels())),
-                     bayerPixels.getData(),
-                     0),
-             cv::Mat(static_cast<int>(pixels.getHeight()),
-                     static_cast<int>(pixels.getWidth()),
-                     static_cast<int>(CV_MAKETYPE(CV_8U, pixels.getNumChannels())),
-                     pixels.getData(),
-                     0),
-             code);
+    cv::Mat source(static_cast<int>(bayerPixels.getHeight()),
+                   static_cast<int>(bayerPixels.getWidth()),
+                   static_cast<int>(CV_MAKETYPE(CV_8U, bayerPixels.getNumChannels())),
+                   bayerPixels.getData(),
+                   0);
+    cv::Mat destination(static_cast<int>(pixels.getHeight()),
+                        static_cast<int>(pixels.getWidth()),
+                        static_cast<int>(CV_MAKETYPE(CV_8U, pixels.getNumChannels())),
+                        pixels.getData(),
+                        0);
+
+    cvtColor(source, destination, code);
+
+    const double contrastScale = static_cast<double>(contrast) / 37.0;
+    const double brightnessOffset = static_cast<double>(brightness) - 20.0;
+    if (contrast != 37 || brightness != 20)
+    {
+        destination.convertTo(destination, -1, contrastScale, brightnessOffset);
+    }
+
+    if (sharpness > 0)
+    {
+        cv::Mat blurred;
+        cv::GaussianBlur(destination, blurred, cv::Size(0, 0), 1.0);
+        const double sharpnessAmount = static_cast<double>(sharpness) / 63.0;
+        cv::addWeighted(destination, 1.0 + sharpnessAmount, blurred, -sharpnessAmount, 0.0, destination);
+    }
+
+    if (hFlip || vFlip)
+    {
+        cv::flip(destination, destination, hFlip && vFlip ? -1 : (hFlip ? 1 : 0));
+    }
 
     return pixels;
 }

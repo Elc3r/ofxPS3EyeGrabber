@@ -218,6 +218,10 @@ public:
 
     static ofPixels bayerConverter(ofPixels& bayerPixels,
                                    ofPixelFormat targetFormat,
+                                   uint8_t brightness,
+                                   uint8_t contrast,
+                                   uint8_t sharpness,
+                                   bool hFlip,
                                    bool vFlip,
                                    DemosaicType _demosaicType);
     
