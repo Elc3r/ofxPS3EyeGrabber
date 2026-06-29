@@ -38,6 +38,9 @@ void ofxPS3EyeGrabber::_stop()
     if (_isThreadRunning)
     {
         _isThreadRunning = false;
+        
+        if (_cam)
+            _cam->stop();
 
         try
         {
@@ -48,7 +51,6 @@ void ofxPS3EyeGrabber::_stop()
             ofLogWarning("ofxPS3EyeGrabber::stop") << "Thread join failed: " << exc.what();
         }
 
-        _cam->stop();
     }
 }
 
@@ -710,7 +712,8 @@ void ofxPS3EyeGrabber::_threadedFunction()
     while (_isThreadRunning)
     {
         bool vFlip = _cam->getFlipV(); // thread safe?
-        _cam->getFrame(pixels.getData()); // thread safe?
+        if (!_cam->getFrame(pixels.getData())) // thread safe?
+            break;
         nowMillis = ofGetElapsedTimeMillis();
         _actualFrameRate = 0.99f * _actualFrameRate + 0.01f * 1000.0f / (nowMillis - lastUpdateTimeMillis);
         lastUpdateTimeMillis = nowMillis;

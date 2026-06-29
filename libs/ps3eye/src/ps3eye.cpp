@@ -435,7 +435,8 @@ namespace ps3eye {
         frame_buffer        ((uint8_t*)malloc(frame_size * num_frames)),
         head                (0),
         tail                (0),
-        available            (0)
+        available            (0),
+        closed                (false)
         {
         }
         
@@ -480,12 +481,22 @@ namespace ps3eye {
             return new_frame;
         }
         
-        void Dequeue(uint8_t* new_frame, int frame_width, int frame_height, PS3EYECam::EOutputFormat outputFormat)
+        void Close()
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            closed = true;
+            empty_condition.notify_all();
+        }
+        
+        bool Dequeue(uint8_t* new_frame, int frame_width, int frame_height, PS3EYECam::EOutputFormat outputFormat)
         {
             std::unique_lock<std::mutex> lock(mutex);
             
             // If there is no data in the buffer, wait until data becomes available
-            empty_condition.wait(lock, [this] () { return available != 0; });
+            empty_condition.wait(lock, [this] () { return closed || available != 0; });
+            
+            if (closed && available == 0)
+                return false;
             
             // Copy from internal buffer
             uint8_t* source = frame_buffer + frame_size * tail;
@@ -506,6 +517,8 @@ namespace ps3eye {
             // Update tail and available count
             tail = (tail + 1) % num_frames;
             available--;
+            
+            return true;
         }
         
         void DebayerGray(int frame_width, int frame_height, const uint8_t* inBayer, uint8_t* outBuffer)
@@ -719,6 +732,7 @@ namespace ps3eye {
         uint32_t                head;
         uint32_t                tail;
         uint32_t                available;
+        bool                    closed;
         
         std::mutex                mutex;
         std::condition_variable    empty_condition;
@@ -740,12 +754,18 @@ namespace ps3eye {
         frame_size                (0),
         frame_queue                (NULL)
         {
+            for (int index = 0; index < NUM_TRANSFERS; ++index)
+            {
+                xfr[index] = NULL;
+            }
         }
         
         ~URBDesc()
         {
             debug("URBDesc destructor\n");
             close_transfers();
+            delete frame_queue;
+            frame_queue = NULL;
         }
         
         bool start_transfers(libusb_device_handle *handle, uint32_t curr_frame_size)
@@ -771,9 +791,22 @@ namespace ps3eye {
             {
                 // Create & submit the transfer
                 xfr[index] = libusb_alloc_transfer(0);
+                if (xfr[index] == NULL)
+                {
+                    res = LIBUSB_ERROR_NO_MEM;
+                    break;
+                }
+                
                 libusb_fill_bulk_transfer(xfr[index], handle, bulk_endpoint, transfer_buffer + index * TRANSFER_SIZE, TRANSFER_SIZE, transfer_completed_callback, reinterpret_cast<void*>(this), 0);
                 
-                res |= libusb_submit_transfer(xfr[index]);
+                int submit_res = libusb_submit_transfer(xfr[index]);
+                if (submit_res != 0)
+                {
+                    libusb_free_transfer(xfr[index]);
+                    xfr[index] = NULL;
+                    res = submit_res;
+                    break;
+                }
                 
                 num_active_transfers++;
             }
@@ -792,10 +825,16 @@ namespace ps3eye {
             if (num_active_transfers == 0)
                 return;
             
+            if (frame_queue)
+                frame_queue->Close();
+            
             // Cancel any pending transfers
             for (int index = 0; index < NUM_TRANSFERS; ++index)
             {
-                libusb_cancel_transfer(xfr[index]);
+                if (xfr[index] != NULL)
+                {
+                    libusb_cancel_transfer(xfr[index]);
+                }
             }
             
             // Wait for cancelation to finish
@@ -806,14 +845,25 @@ namespace ps3eye {
             free(transfer_buffer);
             transfer_buffer = NULL;
             
-            delete frame_queue;
-            frame_queue = NULL;
+            // Keep the closed queue alive until URBDesc is destroyed so any consumer
+            // blocked in Dequeue() can return cleanly during shutdown.
         }
         
-        void transfer_canceled()
+        void transfer_canceled(libusb_transfer * transfer)
         {
             std::lock_guard<std::mutex> lock(num_active_transfers_mutex);
-            --num_active_transfers;
+            for (int index = 0; index < NUM_TRANSFERS; ++index)
+            {
+                if (xfr[index] == transfer)
+                {
+                    xfr[index] = NULL;
+                    break;
+                }
+            }
+            
+            if (num_active_transfers > 0)
+                --num_active_transfers;
+            
             num_active_transfers_condition.notify_one();
         }
         
@@ -961,8 +1011,8 @@ namespace ps3eye {
         {
             debug("transfer status %d\n", status);
             
+            urb->transfer_canceled(xfr);
             libusb_free_transfer(xfr);
-            urb->transfer_canceled();
             
             if(status != LIBUSB_TRANSFER_CANCELLED)
             {
@@ -1214,9 +1264,9 @@ namespace ps3eye {
         return 0;
     }
     
-    void PS3EYECam::getFrame(uint8_t* frame)
+    bool PS3EYECam::getFrame(uint8_t* frame)
     {
-        urb->frame_queue->Dequeue(frame, frame_width, frame_height, frame_output_format);
+        return urb->frame_queue->Dequeue(frame, frame_width, frame_height, frame_output_format);
     }
     
     bool PS3EYECam::open_usb()
@@ -1463,4 +1513,3 @@ namespace ps3eye {
     }
     
 } // namespace
-

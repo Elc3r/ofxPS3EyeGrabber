@@ -14,6 +14,7 @@
 #include "ofEvents.h"
 #include "ofThreadChannel.h"
 #include "ofVideoGrabber.h"
+#include "ofPixels.h"
 #include "ps3eye.h"
 
 
